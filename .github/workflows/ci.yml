@@ -47,24 +47,16 @@ jobs:
           sudo apt-get update && sudo apt-get install -y shellcheck
           shellcheck build.sh
 
-  build:
-    name: Build Multi-Platform Images
+  build-amd64:
+    name: Build AMD64 Image
     runs-on: ubuntu-latest
     needs: validate
     outputs:
       version: ${{ steps.versions.outputs.VERSION }}
-      image_tag: ${{ steps.versions.outputs.IMAGE_TAG }}
-    strategy:
-      matrix:
-        platform:
-          - linux/amd64
-          - linux/arm64
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -87,29 +79,17 @@ jobs:
           echo "NJS_COMMIT_SHA=$NJS_COMMIT_SHA" >> $GITHUB_OUTPUT
           echo "BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $GITHUB_OUTPUT
           echo "VCS_REF=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-          echo "IMAGE_TAG=$VERSION-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.DOCKER_HUB_IMAGE }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=ref,event=branch
-            type=ref,event=pr
-            type=sha
-
-      - name: Build image
+      - name: Build AMD64 image
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
-          platforms: ${{ matrix.platform }}
+          platforms: linux/amd64
           push: false
-          load: false
-          cache-from: type=gha,scope=${{ matrix.platform }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+          load: true
+          cache-from: type=gha,scope=amd64
+          cache-to: type=gha,mode=max,scope=amd64
           build-args: |
             VERSION=${{ steps.versions.outputs.VERSION }}
             SHA256=${{ steps.versions.outputs.SHA256 }}
@@ -125,13 +105,76 @@ jobs:
             NJS_COMMIT_SHA=${{ steps.versions.outputs.NJS_COMMIT_SHA }}
             BUILD_DATE=${{ steps.versions.outputs.BUILD_DATE }}
             VCS_REF=${{ steps.versions.outputs.VCS_REF }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ env.DOCKER_HUB_IMAGE }}:${{ steps.versions.outputs.VERSION }}-amd64
+            ${{ env.GHCR_IMAGE }}:${{ steps.versions.outputs.VERSION }}-amd64
+
+  build-arm64:
+    name: Build ARM64 Image
+    runs-on: ubuntu-24.04-arm
+    needs: validate
+    outputs:
+      version: ${{ steps.versions.outputs.VERSION }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Load versions
+        id: versions
+        run: |
+          source versions.env
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "SHA256=$SHA256" >> $GITHUB_OUTPUT
+          echo "PCRE2_VERSION=$PCRE2_VERSION" >> $GITHUB_OUTPUT
+          echo "PCRE2_SHA256=$PCRE2_SHA256" >> $GITHUB_OUTPUT
+          echo "ZLIB_COMMIT_SHA=$ZLIB_COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "ZLIB_SHA256=$ZLIB_SHA256" >> $GITHUB_OUTPUT
+          echo "OPENSSL_VERSION=$OPENSSL_VERSION" >> $GITHUB_OUTPUT
+          echo "OPENSSL_SHA256=$OPENSSL_SHA256" >> $GITHUB_OUTPUT
+          echo "BROTLI_COMMIT_SHA=$BROTLI_COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "HEADERS_MORE_COMMIT_SHA=$HEADERS_MORE_COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "FANCYINDEX_COMMIT_SHA=$FANCYINDEX_COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "NJS_COMMIT_SHA=$NJS_COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $GITHUB_OUTPUT
+          echo "VCS_REF=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Build ARM64 image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          load: true
+          cache-from: type=gha,scope=arm64
+          cache-to: type=gha,mode=max,scope=arm64
+          build-args: |
+            VERSION=${{ steps.versions.outputs.VERSION }}
+            SHA256=${{ steps.versions.outputs.SHA256 }}
+            PCRE2_VERSION=${{ steps.versions.outputs.PCRE2_VERSION }}
+            PCRE2_SHA256=${{ steps.versions.outputs.PCRE2_SHA256 }}
+            ZLIB_COMMIT_SHA=${{ steps.versions.outputs.ZLIB_COMMIT_SHA }}
+            ZLIB_SHA256=${{ steps.versions.outputs.ZLIB_SHA256 }}
+            OPENSSL_VERSION=${{ steps.versions.outputs.OPENSSL_VERSION }}
+            OPENSSL_SHA256=${{ steps.versions.outputs.OPENSSL_SHA256 }}
+            BROTLI_COMMIT_SHA=${{ steps.versions.outputs.BROTLI_COMMIT_SHA }}
+            HEADERS_MORE_COMMIT_SHA=${{ steps.versions.outputs.HEADERS_MORE_COMMIT_SHA }}
+            FANCYINDEX_COMMIT_SHA=${{ steps.versions.outputs.FANCYINDEX_COMMIT_SHA }}
+            NJS_COMMIT_SHA=${{ steps.versions.outputs.NJS_COMMIT_SHA }}
+            BUILD_DATE=${{ steps.versions.outputs.BUILD_DATE }}
+            VCS_REF=${{ steps.versions.outputs.VCS_REF }}
+          tags: |
+            ${{ env.DOCKER_HUB_IMAGE }}:${{ steps.versions.outputs.VERSION }}-arm64
+            ${{ env.GHCR_IMAGE }}:${{ steps.versions.outputs.VERSION }}-arm64
 
   test:
     name: Test Image
     runs-on: ubuntu-latest
-    needs: build
+    needs: build-amd64
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -153,7 +196,7 @@ jobs:
 
       - name: Test container startup
         run: |
-          docker run -d --name nginx-test -p 8080:80 ${{ env.DOCKER_HUB_IMAGE }}:${{ needs.build.outputs.version }}
+          docker run -d --name nginx-test -p 8080:80 ${{ env.DOCKER_HUB_IMAGE }}:${{ needs.build-amd64.outputs.version }}
           sleep 5
           curl -f http://localhost:8080 || exit 1
           docker logs nginx-test
@@ -167,7 +210,7 @@ jobs:
             --tmpfs /var/cache/nginx:uid=101,gid=101 \
             --tmpfs /var/run:uid=101,gid=101 \
             -p 8081:80 \
-            ${{ env.DOCKER_HUB_IMAGE }}:${{ needs.build.outputs.version }}
+            ${{ env.DOCKER_HUB_IMAGE }}:${{ needs.build-amd64.outputs.version }}
           sleep 5
           curl -f http://localhost:8081 || exit 1
           docker stop nginx-ro-test
@@ -176,7 +219,7 @@ jobs:
   security-scan:
     name: Security Scan
     runs-on: ubuntu-latest
-    needs: build
+    needs: build-amd64
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -196,7 +239,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.DOCKER_HUB_IMAGE }}:${{ needs.build.outputs.version }}
+          image-ref: ${{ env.DOCKER_HUB_IMAGE }}:${{ needs.build-amd64.outputs.version }}
           format: 'sarif'
           output: 'trivy-results.sarif'
           severity: 'CRITICAL,HIGH'
@@ -210,14 +253,14 @@ jobs:
       - name: Run Trivy for detailed report
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.DOCKER_HUB_IMAGE }}:${{ needs.build.outputs.version }}
+          image-ref: ${{ env.DOCKER_HUB_IMAGE }}:${{ needs.build-amd64.outputs.version }}
           format: 'table'
           severity: 'CRITICAL,HIGH,MEDIUM'
 
   sbom:
     name: Generate SBOM
     runs-on: ubuntu-latest
-    needs: build
+    needs: build-amd64
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -252,17 +295,14 @@ jobs:
             sbom-cyclonedx.json
           retention-days: 90
 
-  build-and-push:
-    name: Build and Push
+  push-and-manifest:
+    name: Push Multi-Arch Manifest
     runs-on: ubuntu-latest
-    needs: [build, test, security-scan]
+    needs: [build-amd64, build-arm64, test, security-scan]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -286,87 +326,79 @@ jobs:
         run: |
           source versions.env
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "SHA256=$SHA256" >> $GITHUB_OUTPUT
-          echo "PCRE2_VERSION=$PCRE2_VERSION" >> $GITHUB_OUTPUT
-          echo "PCRE2_SHA256=$PCRE2_SHA256" >> $GITHUB_OUTPUT
-          echo "ZLIB_COMMIT_SHA=$ZLIB_COMMIT_SHA" >> $GITHUB_OUTPUT
-          echo "ZLIB_SHA256=$ZLIB_SHA256" >> $GITHUB_OUTPUT
           echo "OPENSSL_VERSION=$OPENSSL_VERSION" >> $GITHUB_OUTPUT
-          echo "OPENSSL_SHA256=$OPENSSL_SHA256" >> $GITHUB_OUTPUT
-          echo "BROTLI_COMMIT_SHA=$BROTLI_COMMIT_SHA" >> $GITHUB_OUTPUT
-          echo "HEADERS_MORE_COMMIT_SHA=$HEADERS_MORE_COMMIT_SHA" >> $GITHUB_OUTPUT
-          echo "FANCYINDEX_COMMIT_SHA=$FANCYINDEX_COMMIT_SHA" >> $GITHUB_OUTPUT
-          echo "NJS_COMMIT_SHA=$NJS_COMMIT_SHA" >> $GITHUB_OUTPUT
-          echo "BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $GITHUB_OUTPUT
-          echo "VCS_REF=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "PCRE2_VERSION=$PCRE2_VERSION" >> $GITHUB_OUTPUT
 
-      - name: Determine image tags
-        id: tags
+      - name: Pull and push platform images
         run: |
-          TAGS=""
-          # Add Docker Hub tags if credentials are available
-          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
-            TAGS="${{ env.DOCKER_HUB_IMAGE }}:latest,"
-            TAGS="${TAGS}${{ env.DOCKER_HUB_IMAGE }}:${{ steps.versions.outputs.VERSION }},"
-            TAGS="${TAGS}${{ env.DOCKER_HUB_IMAGE }}:${{ steps.versions.outputs.VERSION }}-openssl-${{ steps.versions.outputs.OPENSSL_VERSION }},"
-          fi
-          # Always add GHCR tags
-          TAGS="${TAGS}${{ env.GHCR_IMAGE }}:latest,"
-          TAGS="${TAGS}${{ env.GHCR_IMAGE }}:${{ steps.versions.outputs.VERSION }},"
-          TAGS="${TAGS}${{ env.GHCR_IMAGE }}:${{ steps.versions.outputs.VERSION }}-openssl-${{ steps.versions.outputs.OPENSSL_VERSION }}"
-          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+          VERSION=${{ needs.build-amd64.outputs.version }}
 
-      - name: Build and push
-        id: build-push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          sbom: true
-          provenance: mode=max
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          build-args: |
-            VERSION=${{ steps.versions.outputs.VERSION }}
-            SHA256=${{ steps.versions.outputs.SHA256 }}
-            PCRE2_VERSION=${{ steps.versions.outputs.PCRE2_VERSION }}
-            PCRE2_SHA256=${{ steps.versions.outputs.PCRE2_SHA256 }}
-            ZLIB_COMMIT_SHA=${{ steps.versions.outputs.ZLIB_COMMIT_SHA }}
-            ZLIB_SHA256=${{ steps.versions.outputs.ZLIB_SHA256 }}
-            OPENSSL_VERSION=${{ steps.versions.outputs.OPENSSL_VERSION }}
-            OPENSSL_SHA256=${{ steps.versions.outputs.OPENSSL_SHA256 }}
-            BROTLI_COMMIT_SHA=${{ steps.versions.outputs.BROTLI_COMMIT_SHA }}
-            HEADERS_MORE_COMMIT_SHA=${{ steps.versions.outputs.HEADERS_MORE_COMMIT_SHA }}
-            FANCYINDEX_COMMIT_SHA=${{ steps.versions.outputs.FANCYINDEX_COMMIT_SHA }}
-            NJS_COMMIT_SHA=${{ steps.versions.outputs.NJS_COMMIT_SHA }}
-            BUILD_DATE=${{ steps.versions.outputs.BUILD_DATE }}
-            VCS_REF=${{ steps.versions.outputs.VCS_REF }}
-          tags: ${{ steps.tags.outputs.tags }}
-          labels: |
-            org.opencontainers.image.title=nginx
-            org.opencontainers.image.description=Security-hardened nginx with OpenSSL 3.x and additional modules
-            org.opencontainers.image.version=${{ steps.versions.outputs.VERSION }}
-            org.opencontainers.image.created=${{ steps.versions.outputs.BUILD_DATE }}
-            org.opencontainers.image.revision=${{ steps.versions.outputs.VCS_REF }}
-            org.opencontainers.image.source=${{ github.repositoryUrl }}
-            org.opencontainers.image.url=https://github.com/${{ github.repository }}
-            nginx.version=${{ steps.versions.outputs.VERSION }}
-            openssl.version=${{ steps.versions.outputs.OPENSSL_VERSION }}
+          # Pull built images from local cache
+          docker pull ${{ env.DOCKER_HUB_IMAGE }}:${VERSION}-amd64 || true
+          docker pull ${{ env.DOCKER_HUB_IMAGE }}:${VERSION}-arm64 || true
+
+          # Tag and push to registries
+          # Docker Hub
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
+            docker tag ${{ env.DOCKER_HUB_IMAGE }}:${VERSION}-amd64 ${{ env.DOCKER_HUB_IMAGE }}:${VERSION}-amd64
+            docker tag ${{ env.DOCKER_HUB_IMAGE }}:${VERSION}-arm64 ${{ env.DOCKER_HUB_IMAGE }}:${VERSION}-arm64
+            docker push ${{ env.DOCKER_HUB_IMAGE }}:${VERSION}-amd64
+            docker push ${{ env.DOCKER_HUB_IMAGE }}:${VERSION}-arm64
+          fi
+
+          # GHCR
+          docker tag ${{ env.DOCKER_HUB_IMAGE }}:${VERSION}-amd64 ${{ env.GHCR_IMAGE }}:${VERSION}-amd64
+          docker tag ${{ env.DOCKER_HUB_IMAGE }}:${VERSION}-arm64 ${{ env.GHCR_IMAGE }}:${VERSION}-arm64
+          docker push ${{ env.GHCR_IMAGE }}:${VERSION}-amd64
+          docker push ${{ env.GHCR_IMAGE }}:${VERSION}-arm64
+
+      - name: Create and push multi-arch manifests
+        run: |
+          VERSION=${{ needs.build-amd64.outputs.version }}
+          OPENSSL_VERSION=${{ steps.versions.outputs.OPENSSL_VERSION }}
+
+          # Docker Hub manifests
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
+            docker buildx imagetools create -t ${{ env.DOCKER_HUB_IMAGE }}:latest \
+              ${{ env.DOCKER_HUB_IMAGE }}:${VERSION}-amd64 \
+              ${{ env.DOCKER_HUB_IMAGE }}:${VERSION}-arm64
+
+            docker buildx imagetools create -t ${{ env.DOCKER_HUB_IMAGE }}:${VERSION} \
+              ${{ env.DOCKER_HUB_IMAGE }}:${VERSION}-amd64 \
+              ${{ env.DOCKER_HUB_IMAGE }}:${VERSION}-arm64
+
+            docker buildx imagetools create -t ${{ env.DOCKER_HUB_IMAGE }}:${VERSION}-openssl-${OPENSSL_VERSION} \
+              ${{ env.DOCKER_HUB_IMAGE }}:${VERSION}-amd64 \
+              ${{ env.DOCKER_HUB_IMAGE }}:${VERSION}-arm64
+          fi
+
+          # GHCR manifests
+          docker buildx imagetools create -t ${{ env.GHCR_IMAGE }}:latest \
+            ${{ env.GHCR_IMAGE }}:${VERSION}-amd64 \
+            ${{ env.GHCR_IMAGE }}:${VERSION}-arm64
+
+          docker buildx imagetools create -t ${{ env.GHCR_IMAGE }}:${VERSION} \
+            ${{ env.GHCR_IMAGE }}:${VERSION}-amd64 \
+            ${{ env.GHCR_IMAGE }}:${VERSION}-arm64
+
+          docker buildx imagetools create -t ${{ env.GHCR_IMAGE }}:${VERSION}-openssl-${OPENSSL_VERSION} \
+            ${{ env.GHCR_IMAGE }}:${VERSION}-amd64 \
+            ${{ env.GHCR_IMAGE }}:${VERSION}-arm64
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: Sign images with Cosign (keyless)
+      - name: Sign multi-arch images with Cosign (keyless)
         env:
           COSIGN_YES: "true"
         run: |
-          # Sign Docker Hub image if credentials were provided
+          VERSION=${{ needs.build-amd64.outputs.version }}
+          # Sign Docker Hub multi-arch image if credentials were provided
           if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
-            cosign sign --yes ${{ env.DOCKER_HUB_IMAGE }}:${{ steps.versions.outputs.VERSION }}@${{ steps.build-push.outputs.digest }}
+            cosign sign --yes ${{ env.DOCKER_HUB_IMAGE }}:${VERSION}
           fi
-          # Always sign GHCR image
-          cosign sign --yes ${{ env.GHCR_IMAGE }}:${{ steps.versions.outputs.VERSION }}@${{ steps.build-push.outputs.digest }}
+          # Always sign GHCR multi-arch image
+          cosign sign --yes ${{ env.GHCR_IMAGE }}:${VERSION}
 
       - name: Update Docker Hub description
         continue-on-error: true
@@ -380,30 +412,38 @@ jobs:
 
       - name: Generate release summary
         run: |
-          echo "## Images Published" >> $GITHUB_STEP_SUMMARY
+          VERSION=${{ needs.build-amd64.outputs.version }}
+          OPENSSL_VERSION=${{ steps.versions.outputs.OPENSSL_VERSION }}
+
+          echo "## Multi-Arch Images Published" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Architectures**: linux/amd64, linux/arm64 (native builds, no emulation!)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
           if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
             echo "### Docker Hub" >> $GITHUB_STEP_SUMMARY
             echo "- \`${{ env.DOCKER_HUB_IMAGE }}:latest\`" >> $GITHUB_STEP_SUMMARY
-            echo "- \`${{ env.DOCKER_HUB_IMAGE }}:${{ steps.versions.outputs.VERSION }}\`" >> $GITHUB_STEP_SUMMARY
-            echo "- \`${{ env.DOCKER_HUB_IMAGE }}:${{ steps.versions.outputs.VERSION }}-openssl-${{ steps.versions.outputs.OPENSSL_VERSION }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`${{ env.DOCKER_HUB_IMAGE }}:${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`${{ env.DOCKER_HUB_IMAGE }}:${VERSION}-openssl-${OPENSSL_VERSION}\`" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
           fi
+
           echo "### GitHub Container Registry" >> $GITHUB_STEP_SUMMARY
           echo "- \`${{ env.GHCR_IMAGE }}:latest\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`${{ env.GHCR_IMAGE }}:${{ steps.versions.outputs.VERSION }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`${{ env.GHCR_IMAGE }}:${{ steps.versions.outputs.VERSION }}-openssl-${{ steps.versions.outputs.OPENSSL_VERSION }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ env.GHCR_IMAGE }}:${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ env.GHCR_IMAGE }}:${VERSION}-openssl-${OPENSSL_VERSION}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+
           echo "## Versions" >> $GITHUB_STEP_SUMMARY
-          echo "- nginx: ${{ steps.versions.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
-          echo "- OpenSSL: ${{ steps.versions.outputs.OPENSSL_VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- nginx: ${VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "- OpenSSL: ${OPENSSL_VERSION}" >> $GITHUB_STEP_SUMMARY
           echo "- PCRE2: ${{ steps.versions.outputs.PCRE2_VERSION }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Digest: \`${{ steps.build-push.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+
           echo "## Verification" >> $GITHUB_STEP_SUMMARY
-          echo "Verify image signature with:" >> $GITHUB_STEP_SUMMARY
+          echo "Verify multi-arch image signature with:" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-          echo "cosign verify ${{ env.GHCR_IMAGE }}:${{ steps.versions.outputs.VERSION }} \\" >> $GITHUB_STEP_SUMMARY
+          echo "cosign verify ${{ env.GHCR_IMAGE }}:${VERSION} \\" >> $GITHUB_STEP_SUMMARY
           echo "  --certificate-identity https://github.com/${{ github.repository }}/.github/workflows/ci.yml@refs/heads/master \\" >> $GITHUB_STEP_SUMMARY
           echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

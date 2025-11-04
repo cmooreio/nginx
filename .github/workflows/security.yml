@@ -40,7 +40,7 @@ jobs:
 
       - name: Run Grype scanner
         if: matrix.scanner == 'grype'
-        uses: anchore/scan-action@v3
+        uses: anchore/scan-action@v7
         with:
           image: 'cmooreio/nginx:latest'
           fail-build: false

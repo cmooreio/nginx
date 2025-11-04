@@ -78,6 +78,7 @@ jobs:
           echo "PCRE2_VERSION=$PCRE2_VERSION" >> $GITHUB_OUTPUT
           echo "PCRE2_SHA256=$PCRE2_SHA256" >> $GITHUB_OUTPUT
           echo "ZLIB_COMMIT_SHA=$ZLIB_COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "ZLIB_SHA256=$ZLIB_SHA256" >> $GITHUB_OUTPUT
           echo "OPENSSL_VERSION=$OPENSSL_VERSION" >> $GITHUB_OUTPUT
           echo "OPENSSL_SHA256=$OPENSSL_SHA256" >> $GITHUB_OUTPUT
           echo "BROTLI_COMMIT_SHA=$BROTLI_COMMIT_SHA" >> $GITHUB_OUTPUT
@@ -115,6 +116,7 @@ jobs:
             PCRE2_VERSION=${{ steps.versions.outputs.PCRE2_VERSION }}
             PCRE2_SHA256=${{ steps.versions.outputs.PCRE2_SHA256 }}
             ZLIB_COMMIT_SHA=${{ steps.versions.outputs.ZLIB_COMMIT_SHA }}
+            ZLIB_SHA256=${{ steps.versions.outputs.ZLIB_SHA256 }}
             OPENSSL_VERSION=${{ steps.versions.outputs.OPENSSL_VERSION }}
             OPENSSL_SHA256=${{ steps.versions.outputs.OPENSSL_SHA256 }}
             BROTLI_COMMIT_SHA=${{ steps.versions.outputs.BROTLI_COMMIT_SHA }}
@@ -288,6 +290,7 @@ jobs:
           echo "PCRE2_VERSION=$PCRE2_VERSION" >> $GITHUB_OUTPUT
           echo "PCRE2_SHA256=$PCRE2_SHA256" >> $GITHUB_OUTPUT
           echo "ZLIB_COMMIT_SHA=$ZLIB_COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "ZLIB_SHA256=$ZLIB_SHA256" >> $GITHUB_OUTPUT
           echo "OPENSSL_VERSION=$OPENSSL_VERSION" >> $GITHUB_OUTPUT
           echo "OPENSSL_SHA256=$OPENSSL_SHA256" >> $GITHUB_OUTPUT
           echo "BROTLI_COMMIT_SHA=$BROTLI_COMMIT_SHA" >> $GITHUB_OUTPUT
@@ -330,6 +333,7 @@ jobs:
             PCRE2_VERSION=${{ steps.versions.outputs.PCRE2_VERSION }}
             PCRE2_SHA256=${{ steps.versions.outputs.PCRE2_SHA256 }}
             ZLIB_COMMIT_SHA=${{ steps.versions.outputs.ZLIB_COMMIT_SHA }}
+            ZLIB_SHA256=${{ steps.versions.outputs.ZLIB_SHA256 }}
             OPENSSL_VERSION=${{ steps.versions.outputs.OPENSSL_VERSION }}
             OPENSSL_SHA256=${{ steps.versions.outputs.OPENSSL_SHA256 }}
             BROTLI_COMMIT_SHA=${{ steps.versions.outputs.BROTLI_COMMIT_SHA }}

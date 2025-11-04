@@ -1,0 +1,405 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ master, main, develop ]
+    tags: [ 'v*.*.*' ]
+  pull_request:
+    branches: [ master, main ]
+  schedule:
+    # Run weekly security scans
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+env:
+  DOCKER_HUB_IMAGE: cmooreio/nginx
+  GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/nginx
+
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+  id-token: write  # For cosign signing
+
+jobs:
+  validate:
+    name: Validate Configuration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate versions.env
+        run: |
+          test -f versions.env || exit 1
+          source versions.env
+          test -n "$VERSION" || exit 1
+          test -n "$OPENSSL_VERSION" || exit 1
+
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+
+      - name: Lint shell scripts
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck build.sh
+
+  build:
+    name: Build Multi-Platform Images
+    runs-on: ubuntu-latest
+    needs: validate
+    outputs:
+      version: ${{ steps.versions.outputs.VERSION }}
+      image_tag: ${{ steps.versions.outputs.IMAGE_TAG }}
+    strategy:
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Load versions
+        id: versions
+        run: |
+          source versions.env
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "SHA256=$SHA256" >> $GITHUB_OUTPUT
+          echo "PCRE2_VERSION=$PCRE2_VERSION" >> $GITHUB_OUTPUT
+          echo "PCRE2_SHA256=$PCRE2_SHA256" >> $GITHUB_OUTPUT
+          echo "ZLIB_COMMIT_SHA=$ZLIB_COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "OPENSSL_VERSION=$OPENSSL_VERSION" >> $GITHUB_OUTPUT
+          echo "OPENSSL_SHA256=$OPENSSL_SHA256" >> $GITHUB_OUTPUT
+          echo "BROTLI_COMMIT_SHA=$BROTLI_COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "HEADERS_MORE_COMMIT_SHA=$HEADERS_MORE_COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "FANCYINDEX_COMMIT_SHA=$FANCYINDEX_COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "NJS_COMMIT_SHA=$NJS_COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $GITHUB_OUTPUT
+          echo "VCS_REF=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "IMAGE_TAG=$VERSION-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_HUB_IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha
+
+      - name: Build image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: false
+          load: false
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+          build-args: |
+            VERSION=${{ steps.versions.outputs.VERSION }}
+            SHA256=${{ steps.versions.outputs.SHA256 }}
+            PCRE2_VERSION=${{ steps.versions.outputs.PCRE2_VERSION }}
+            PCRE2_SHA256=${{ steps.versions.outputs.PCRE2_SHA256 }}
+            ZLIB_COMMIT_SHA=${{ steps.versions.outputs.ZLIB_COMMIT_SHA }}
+            OPENSSL_VERSION=${{ steps.versions.outputs.OPENSSL_VERSION }}
+            OPENSSL_SHA256=${{ steps.versions.outputs.OPENSSL_SHA256 }}
+            BROTLI_COMMIT_SHA=${{ steps.versions.outputs.BROTLI_COMMIT_SHA }}
+            HEADERS_MORE_COMMIT_SHA=${{ steps.versions.outputs.HEADERS_MORE_COMMIT_SHA }}
+            FANCYINDEX_COMMIT_SHA=${{ steps.versions.outputs.FANCYINDEX_COMMIT_SHA }}
+            NJS_COMMIT_SHA=${{ steps.versions.outputs.NJS_COMMIT_SHA }}
+            BUILD_DATE=${{ steps.versions.outputs.BUILD_DATE }}
+            VCS_REF=${{ steps.versions.outputs.VCS_REF }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  test:
+    name: Test Image
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Load versions
+        id: versions
+        run: |
+          source versions.env
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build test image
+        run: make build-single
+
+      - name: Run smoke tests
+        run: make smoke-test
+
+      - name: Test container startup
+        run: |
+          docker run -d --name nginx-test -p 8080:80 ${{ env.DOCKER_HUB_IMAGE }}:${{ needs.build.outputs.version }}
+          sleep 5
+          curl -f http://localhost:8080 || exit 1
+          docker logs nginx-test
+          docker stop nginx-test
+          docker rm nginx-test
+
+      - name: Test read-only filesystem
+        run: |
+          docker run -d --name nginx-ro-test \
+            --read-only \
+            --tmpfs /var/cache/nginx:uid=101,gid=101 \
+            --tmpfs /var/run:uid=101,gid=101 \
+            -p 8081:80 \
+            ${{ env.DOCKER_HUB_IMAGE }}:${{ needs.build.outputs.version }}
+          sleep 5
+          curl -f http://localhost:8081 || exit 1
+          docker stop nginx-ro-test
+          docker rm nginx-ro-test
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Load versions
+        id: versions
+        run: |
+          source versions.env
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build image for scanning
+        run: make build-single
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.DOCKER_HUB_IMAGE }}:${{ needs.build.outputs.version }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Run Trivy for detailed report
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.DOCKER_HUB_IMAGE }}:${{ needs.build.outputs.version }}
+          format: 'table'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+
+  sbom:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Load versions
+        id: versions
+        run: |
+          source versions.env
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build image
+        run: make build-single
+
+      - name: Install Syft
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Generate SBOM
+        run: |
+          syft ${{ env.DOCKER_HUB_IMAGE }}:${{ needs.build.outputs.version }} -o spdx-json > sbom-spdx.json
+          syft ${{ env.DOCKER_HUB_IMAGE }}:${{ needs.build.outputs.version }} -o cyclonedx-json > sbom-cyclonedx.json
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: |
+            sbom-spdx.json
+            sbom-cyclonedx.json
+          retention-days: 90
+
+  build-and-push:
+    name: Build and Push
+    runs-on: ubuntu-latest
+    needs: [build, test, security-scan]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: secrets.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Load versions
+        id: versions
+        run: |
+          source versions.env
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "SHA256=$SHA256" >> $GITHUB_OUTPUT
+          echo "PCRE2_VERSION=$PCRE2_VERSION" >> $GITHUB_OUTPUT
+          echo "PCRE2_SHA256=$PCRE2_SHA256" >> $GITHUB_OUTPUT
+          echo "ZLIB_COMMIT_SHA=$ZLIB_COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "OPENSSL_VERSION=$OPENSSL_VERSION" >> $GITHUB_OUTPUT
+          echo "OPENSSL_SHA256=$OPENSSL_SHA256" >> $GITHUB_OUTPUT
+          echo "BROTLI_COMMIT_SHA=$BROTLI_COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "HEADERS_MORE_COMMIT_SHA=$HEADERS_MORE_COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "FANCYINDEX_COMMIT_SHA=$FANCYINDEX_COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "NJS_COMMIT_SHA=$NJS_COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $GITHUB_OUTPUT
+          echo "VCS_REF=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Determine image tags
+        id: tags
+        run: |
+          TAGS=""
+          # Add Docker Hub tags if credentials are available
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
+            TAGS="${{ env.DOCKER_HUB_IMAGE }}:latest,"
+            TAGS="${TAGS}${{ env.DOCKER_HUB_IMAGE }}:${{ steps.versions.outputs.VERSION }},"
+            TAGS="${TAGS}${{ env.DOCKER_HUB_IMAGE }}:${{ steps.versions.outputs.VERSION }}-openssl-${{ steps.versions.outputs.OPENSSL_VERSION }},"
+          fi
+          # Always add GHCR tags
+          TAGS="${TAGS}${{ env.GHCR_IMAGE }}:latest,"
+          TAGS="${TAGS}${{ env.GHCR_IMAGE }}:${{ steps.versions.outputs.VERSION }},"
+          TAGS="${TAGS}${{ env.GHCR_IMAGE }}:${{ steps.versions.outputs.VERSION }}-openssl-${{ steps.versions.outputs.OPENSSL_VERSION }}"
+          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+
+      - name: Build and push
+        id: build-push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ steps.versions.outputs.VERSION }}
+            SHA256=${{ steps.versions.outputs.SHA256 }}
+            PCRE2_VERSION=${{ steps.versions.outputs.PCRE2_VERSION }}
+            PCRE2_SHA256=${{ steps.versions.outputs.PCRE2_SHA256 }}
+            ZLIB_COMMIT_SHA=${{ steps.versions.outputs.ZLIB_COMMIT_SHA }}
+            OPENSSL_VERSION=${{ steps.versions.outputs.OPENSSL_VERSION }}
+            OPENSSL_SHA256=${{ steps.versions.outputs.OPENSSL_SHA256 }}
+            BROTLI_COMMIT_SHA=${{ steps.versions.outputs.BROTLI_COMMIT_SHA }}
+            HEADERS_MORE_COMMIT_SHA=${{ steps.versions.outputs.HEADERS_MORE_COMMIT_SHA }}
+            FANCYINDEX_COMMIT_SHA=${{ steps.versions.outputs.FANCYINDEX_COMMIT_SHA }}
+            NJS_COMMIT_SHA=${{ steps.versions.outputs.NJS_COMMIT_SHA }}
+            BUILD_DATE=${{ steps.versions.outputs.BUILD_DATE }}
+            VCS_REF=${{ steps.versions.outputs.VCS_REF }}
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=nginx
+            org.opencontainers.image.description=Security-hardened nginx with OpenSSL 3.x and additional modules
+            org.opencontainers.image.version=${{ steps.versions.outputs.VERSION }}
+            org.opencontainers.image.created=${{ steps.versions.outputs.BUILD_DATE }}
+            org.opencontainers.image.revision=${{ steps.versions.outputs.VCS_REF }}
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            nginx.version=${{ steps.versions.outputs.VERSION }}
+            openssl.version=${{ steps.versions.outputs.OPENSSL_VERSION }}
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign images with Cosign (keyless)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          # Sign Docker Hub image if credentials were provided
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
+            cosign sign --yes ${{ env.DOCKER_HUB_IMAGE }}:${{ steps.versions.outputs.VERSION }}@${{ steps.build-push.outputs.digest }}
+          fi
+          # Always sign GHCR image
+          cosign sign --yes ${{ env.GHCR_IMAGE }}:${{ steps.versions.outputs.VERSION }}@${{ steps.build-push.outputs.digest }}
+
+      - name: Update Docker Hub description
+        if: secrets.DOCKERHUB_USERNAME != ''
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ env.DOCKER_HUB_IMAGE }}
+          short-description: "Security-hardened nginx with OpenSSL 3.x and additional modules"
+          readme-filepath: ./README.md
+
+      - name: Generate release summary
+        run: |
+          echo "## Images Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
+            echo "### Docker Hub" >> $GITHUB_STEP_SUMMARY
+            echo "- \`${{ env.DOCKER_HUB_IMAGE }}:latest\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`${{ env.DOCKER_HUB_IMAGE }}:${{ steps.versions.outputs.VERSION }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`${{ env.DOCKER_HUB_IMAGE }}:${{ steps.versions.outputs.VERSION }}-openssl-${{ steps.versions.outputs.OPENSSL_VERSION }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "### GitHub Container Registry" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ env.GHCR_IMAGE }}:latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ env.GHCR_IMAGE }}:${{ steps.versions.outputs.VERSION }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ env.GHCR_IMAGE }}:${{ steps.versions.outputs.VERSION }}-openssl-${{ steps.versions.outputs.OPENSSL_VERSION }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Versions" >> $GITHUB_STEP_SUMMARY
+          echo "- nginx: ${{ steps.versions.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- OpenSSL: ${{ steps.versions.outputs.OPENSSL_VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- PCRE2: ${{ steps.versions.outputs.PCRE2_VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Digest: \`${{ steps.build-push.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Verification" >> $GITHUB_STEP_SUMMARY
+          echo "Verify image signature with:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "cosign verify ${{ env.GHCR_IMAGE }}:${{ steps.versions.outputs.VERSION }} \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --certificate-identity https://github.com/${{ github.repository }}/.github/workflows/ci.yml@refs/heads/master \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

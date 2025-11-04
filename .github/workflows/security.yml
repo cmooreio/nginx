@@ -1,0 +1,78 @@
+name: Security Scanning
+
+on:
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+  push:
+    branches: [ master, main ]
+    paths:
+      - 'Dockerfile'
+      - 'versions.env'
+      - '.github/workflows/security.yml'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  image-scan:
+    name: Scan Published Image
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        scanner: [trivy, grype]
+    steps:
+      - name: Run Trivy scanner
+        if: matrix.scanner == 'trivy'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'cmooreio/nginx:latest'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy results
+        if: matrix.scanner == 'trivy'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Run Grype scanner
+        if: matrix.scanner == 'grype'
+        uses: anchore/scan-action@v3
+        with:
+          image: 'cmooreio/nginx:latest'
+          fail-build: false
+          severity-cutoff: high
+
+  dockerfile-scan:
+    name: Scan Dockerfile
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+          format: sarif
+          output-file: hadolint-results.sarif
+
+      - name: Upload Hadolint results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: hadolint-results.sarif
+
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4

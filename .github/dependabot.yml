@@ -1,0 +1,39 @@
+version: 2
+updates:
+  # GitHub Actions updates
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "03:00"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    reviewers:
+      - "cmooreio"
+    assignees:
+      - "cmooreio"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    open-pull-requests-limit: 5
+
+  # Docker base image updates
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "03:00"
+    labels:
+      - "dependencies"
+      - "docker"
+    reviewers:
+      - "cmooreio"
+    assignees:
+      - "cmooreio"
+    commit-message:
+      prefix: "docker"
+      include: "scope"
+    open-pull-requests-limit: 3
